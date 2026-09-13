@@ -161,25 +161,30 @@ def parse_bmo(text: str) -> list[dict]:
 
 def parse_scotiabank(text: str) -> list[dict]:
     """
-    Scotiabank export. Handles two formats:
+    Scotiabank export. Handles two formats, each of which may come back in English
+    or French depending on the device/browser's language setting:
       1. Chequing: Date, Description, Withdrawals, Deposits, Total Balance
-      2. ScotiaLine LOC: Filter, Date, Description, Sub-description, Status,
-         Type of Transaction, Amount
+      2. ScotiaLine LOC / Scene Visa: Filter, Date, Description, Sub-description,
+         Status, Type of Transaction, Amount — or in French: Filtre, Date,
+         Description, Sous-description, État, Type d'opération, Montant
          (Amount is positive for debits/charges, negative for credits/payments —
           negate to get our sign convention)
     """
-    csv_text = _find_header_line(text, ["Withdrawals", "Deposits", "Date Posted", "Transaction Type"])
+    csv_text = _find_header_line(text, [
+        "Withdrawals", "Deposits", "Date Posted", "Type of Transaction",
+        "Sous-description", "Montant",
+    ])
     rows = []
     for row in _iter_rows(csv_text):
         date_str = row.get("Date") or row.get("Date Posted") or ""
         description = row.get("Description", "").strip('"').strip()
         # Append sub-description when present (ScotiaLine format)
-        sub = row.get("Sub-description", "").strip('"').strip()
+        sub = (row.get("Sub-description") or row.get("Sous-description") or "").strip('"').strip()
         if sub:
             description = f"{description} {sub}".strip()
 
         txn_amount_str = row.get("Transaction Amount", "")
-        raw_amount_str = row.get("Amount", "")
+        raw_amount_str = row.get("Amount") or row.get("Montant") or ""
 
         if txn_amount_str:
             try:
