@@ -365,6 +365,7 @@ def debt_view():
             Transaction.account_id == acct.id,
             Transaction.amount > 0,
             Transaction.debt_used == True,
+            (Transaction.source != "manual") | (Transaction.source == None),
         )
         if archive_date:
             dismissed_q = dismissed_q.filter(Transaction.date >= archive_date)
@@ -444,8 +445,29 @@ def debt_view():
                     } for t in hist_txns],
                 }
 
+        # Balance owed right now: the "before balance" anchor plus every transaction since it
+        # (negative balance = money owed). Used for accounts with no itemized charges, like a
+        # personal loan, where payments are recorded directly against the balance.
+        since_q = db.session.query(db.func.sum(Transaction.amount)).filter(Transaction.account_id == acct.id)
+        if acct.balance_date:
+            since_q = since_q.filter(Transaction.date >= acct.balance_date)
+        current_owed = round(-((acct.balance or 0.0) + (since_q.scalar() or 0.0)), 2)
+
+        manual_payments = [{
+            'id': t.id,
+            'date': t.date.isoformat(),
+            'description': t.description,
+            'amount': round(t.amount, 2),
+        } for t in Transaction.query.filter(
+            Transaction.account_id == acct.id,
+            Transaction.source == "manual",
+            Transaction.amount > 0,
+        ).order_by(Transaction.date.desc(), Transaction.id.desc()).all()]
+
         result.append({
             'id': acct.id,
+            'current_owed': current_owed,
+            'manual_payments': manual_payments,
             'name': acct.name,
             'bank': acct.bank,
             'balance': acct.balance,
@@ -559,6 +581,37 @@ def apply_debt_payment():
 
     db.session.commit()
     return jsonify({"updated": updated})
+
+
+@app.route("/api/debt/accounts/<int:account_id>/payments", methods=["POST"])
+def record_manual_payment(account_id):
+    """Record a payment straight against an account's balance, with no charge to apply it to
+    (e.g. a personal loan that never has imported transactions). Stored as a positive
+    transaction with source='manual' so it lowers the balance owed and shows in history."""
+    acct = Account.query.get(account_id)
+    if not acct:
+        return jsonify({"error": "Account not found"}), 404
+    body = request.get_json(silent=True) or {}
+    try:
+        amount = round(float(body.get("amount")), 2)
+    except (TypeError, ValueError):
+        return jsonify({"error": "amount is required"}), 400
+    if amount <= 0:
+        return jsonify({"error": "amount must be greater than 0"}), 400
+    try:
+        pay_date = _parse_date_field(body.get("date")) or date.today()
+    except (ValueError, OverflowError):
+        return jsonify({"error": "invalid date"}), 400
+    description = (body.get("description") or "").strip() or "Payment"
+
+    t = Transaction(
+        date=pay_date, description=description, amount=amount,
+        type="income", source="manual", account_id=acct.id,
+        debt_used=True,  # never shows up in the "payments received" list waiting to be applied
+    )
+    db.session.add(t)
+    db.session.commit()
+    return jsonify(_txn_dict(t)), 201
 
 
 @app.route("/api/debt/links/<int:link_id>", methods=["PATCH"])
